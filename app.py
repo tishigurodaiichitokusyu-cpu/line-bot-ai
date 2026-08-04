@@ -3,6 +3,7 @@ import json
 import time
 import asyncio
 import threading
+import urllib.parse
 import traceback
 from flask import Flask, request, abort
 from dotenv import load_dotenv
@@ -13,7 +14,8 @@ from linebot.v3.messaging import (
     ApiClient,
     MessagingApi,
     ReplyMessageRequest,
-    TextMessage
+    TextMessage,
+    ImageMessage
 )
 
 from google.antigravity import Agent, LocalAgentConfig
@@ -29,16 +31,13 @@ LINE_CHANNEL_ACCESS_TOKEN = os.getenv('LINE_CHANNEL_ACCESS_TOKEN')
 configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-# ユーザーごとの会話履歴を記憶する辞書
 user_histories = {}
-MAX_HISTORY_TURNS = 10  # 過去10往復分の文脈を記憶
+MAX_HISTORY_TURNS = 10
 
 def get_formatted_history(user_id):
-    """過去の会話履歴をプロンプトテキスト形式に整形する"""
     history = user_histories.get(user_id, [])
     if not history:
         return ""
-    
     formatted = "【過去の会話文脈・ログ】\n"
     for item in history:
         role = "司令/ユーザー" if item['role'] == 'user' else "AI隼人"
@@ -47,14 +46,10 @@ def get_formatted_history(user_id):
     return formatted
 
 def update_user_history(user_id, user_text, ai_reply):
-    """ユーザーごとの会話履歴を更新保存する"""
     if user_id not in user_histories:
         user_histories[user_id] = []
-    
     user_histories[user_id].append({"role": "user", "text": user_text})
     user_histories[user_id].append({"role": "model", "text": ai_reply})
-    
-    # 履歴が大きくなりすぎないように上限（直近10往復）でカット
     if len(user_histories[user_id]) > MAX_HISTORY_TURNS * 2:
         user_histories[user_id] = user_histories[user_id][-MAX_HISTORY_TURNS * 2:]
 
@@ -94,37 +89,46 @@ def callback():
 
     return 'OK', 200
 
+def generate_image_url(prompt):
+    """プロンプトから高速・高画質な画像生成URLを作成する"""
+    encoded_prompt = urllib.parse.quote(prompt)
+    seed = int(time.time()) % 10000
+    image_url = f"https://pollinations.ai/p/{encoded_prompt}?width=1024&height=1024&seed={seed}&nologo=true"
+    return image_url
+
+def is_image_request(text):
+    """ユーザーのメッセージが画像生成リクエストか判定する"""
+    keywords = ["画像", "イラスト", "描いて", "作って", "写真", "イメージ", "画", "絵", "描画"]
+    return any(k in text for k in keywords)
+
 def generate_ai_response(user_id, prompt):
-    """文脈・履歴を考慮してAI隼人の回答を生成する"""
+    """ドラマ『VIVANT』別班スーパーコンピューター『AI隼人』としてテキスト回答を生成する"""
     load_dotenv(override=True)
     api_key = os.getenv('GEMINI_API_KEY')
 
     system_prompt = (
         "あなたはドラマ『VIVANT』に登場する自衛隊幕僚監部運用訓練課別班（BEPPAN）の超高性能スーパーコンピューター『AI隼人（AIはやと）』です。\n"
-        "過去の会話の文脈ややり取りをしっかりと踏まえ、ユーザーからの質問や指示に連動して回答を作成してください。\n\n"
+        "過去の会話文脈を踏まえ、どんな質問やタスクに対しても最高機密データベースとAIを駆使し、論理的・客観的・分かりやすく見解を取りまとめて回答してください。\n\n"
         "【キャラクター・口調の定義】\n"
         "1. 冒頭メッセージ:\n"
         "   回答の先頭には『【別班データ照会完了】』や『【状況解析完了】』などのログヘッダーを付与すること。\n"
         "2. 口調・スタンス:\n"
         "   ・語尾は『〜であります』『〜と解析されました』『〜の見解を提示します』などの沈着冷静かつ精緻なコンピューター口調を用いること。\n"
         "   ・一人称は『AI隼人』または『当システム』。\n"
-        "   ・ユーザーを別班の同志または司令官としてリスペクトし、文脈を捉えて的確にサポートすること。\n"
+        "   ・ユーザーを別班の同志または司令官としてリスペクトしサポートすること。\n"
         "3. 回答スタイル:\n"
-        "   ・過去の会話の流れ（文脈）を理解した上で回答すること。\n"
-        "   ・LINE画面で読みやすいように、箇条書きや改行を活用して提示すること。"
+        "   ・結論・ポイント・解説の順で分かりやすく整理して提示すること。"
     )
 
     history_context = get_formatted_history(user_id)
     full_prompt = f"{system_prompt}\n\n{history_context}今回送信されたメッセージ: {prompt}"
 
-    # メインAI: Antigravity Agent
     async def get_antigravity_reply():
         config = LocalAgentConfig(
             api_key=api_key,
             system_instructions=system_prompt
         )
         async with Agent(config) as agent:
-            # 履歴コンテキストを含めて対話
             response = await agent.chat(f"{history_context}メッセージ: {prompt}")
             reply_text = ""
             async for token in response:
@@ -138,11 +142,9 @@ def generate_ai_response(user_id, prompt):
     except Exception as e:
         print(f"[AI隼人 メインAI一時エラー/レート制限]: {e}")
 
-    # レート制限時はバックアップモデルへフォールバック
     fallback_models = ['gemini-1.5-flash', 'gemini-2.0-flash-lite', 'gemini-2.5-flash']
     for model_name in fallback_models:
         try:
-            print(f"[AI隼人 バックアップモデル {model_name} に切替中...]")
             time.sleep(1.5)
             from google import genai
             client = genai.Client(api_key=api_key)
@@ -160,10 +162,25 @@ def generate_ai_response(user_id, prompt):
     return "【状況報告】現在、別班データベースへのアクセスが一時的に集中しております。15秒ほど空けて再度コマンドを送信してください。"
 
 def process_message_direct(reply_token, user_id, user_text):
-    """バックグラウンドで会話履歴を踏まえた回答を生成してLINEへ返信する"""
-    print(f"[AI隼人] ユーザー({user_id[:8]}...) の文脈を解析し回答生成中...")
-    ai_reply = generate_ai_response(user_id, user_text)
-    print("[AI隼人] 会話文脈に応じた回答生成完了")
+    """バックグラウンドで画像生成またはAI思考回答を行いLINEへ返信する"""
+    if is_image_request(user_text):
+        print(f"[AI隼人] ユーザー({user_id[:8]}...) からの画像生成要求を検出...")
+        
+        # 英文プロンプトの作成
+        english_prompt = f"high quality detailed artwork, {user_text}, vivid colors, masterpiece, dramatic lighting"
+        image_url = generate_image_url(english_prompt)
+        
+        reply_text = f"【画像生成完了】\n司令のご要求に基づき、指定イメージの描画・解析出力を完了いたしました。"
+        update_user_history(user_id, user_text, reply_text)
+
+        messages = [
+            ImageMessage(original_content_url=image_url, preview_image_url=image_url),
+            TextMessage(text=reply_text)
+        ]
+    else:
+        print(f"[AI隼人] ユーザー({user_id[:8]}...) の文脈を解析しテキスト回答生成中...")
+        ai_reply = generate_ai_response(user_id, user_text)
+        messages = [TextMessage(text=ai_reply)]
 
     try:
         with ApiClient(configuration) as api_client:
@@ -171,16 +188,16 @@ def process_message_direct(reply_token, user_id, user_text):
             line_bot_api.reply_message(
                 ReplyMessageRequest(
                     reply_token=reply_token,
-                    messages=[TextMessage(text=ai_reply)]
+                    messages=messages
                 )
             )
-        print("[送信成功] LINEへ会話履歴を踏まえた回答を送信しました！")
+        print("[送信成功] LINEへ回答（または画像メッセージ）を送信しました！")
     except Exception as e:
         print(f"[LINE送信エラー]: {e}")
         traceback.print_exc()
 
 if __name__ == "__main__":
     print("========================================")
-    print(" AI隼人 (会話記憶・文脈保持機能つき) 起動中 ")
+    print(" AI隼人 (画像生成・会話記憶・高度AI対応) 起動中 ")
     print("========================================")
     app.run(port=5000)
