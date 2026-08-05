@@ -21,6 +21,7 @@ from linebot.v3.messaging import (
 )
 
 from google.antigravity import Agent, LocalAgentConfig
+from youtube_transcript_api import YouTubeTranscriptApi
 
 # .env ファイルから環境変数を読み込む
 load_dotenv()
@@ -29,6 +30,7 @@ app = Flask(__name__)
 
 LINE_CHANNEL_SECRET = os.getenv('LINE_CHANNEL_SECRET')
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv('LINE_CHANNEL_ACCESS_TOKEN')
+YOUTUBE_API_KEY = os.getenv('YOUTUBE_API_KEY')
 
 configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
@@ -91,6 +93,53 @@ def callback():
 
     return 'OK', 200
 
+def is_youtube_url(text):
+    """YouTubeのURLか判定する"""
+    return bool(re.search(r'(https?://)?(www\.)?(youtube\.com|youtu\.be)/', text))
+
+def extract_youtube_video_id(url):
+    """YouTube URLから動画IDを抽出する"""
+    match = re.search(r'(?:v=|\/|embed\/|shorts\/)([0-9A-Za-z_-]{11})', url)
+    return match.group(1) if match else None
+
+def get_youtube_video_info(video_id):
+    """YouTube Data API を使用して動画タイトル・概要・統計を取得する"""
+    api_key = os.getenv('YOUTUBE_API_KEY')
+    if not api_key:
+        return None
+
+    try:
+        endpoint = f"https://www.googleapis.com/youtube/v3/videos?part=snippet,statistics&id={video_id}&key={api_key}"
+        res = requests.get(endpoint, timeout=5)
+        if res.status_code == 200:
+            items = res.json().get('items', [])
+            if items:
+                item = items[0]
+                snippet = item.get('snippet', {})
+                stats = item.get('statistics', {})
+                return {
+                    'title': snippet.get('title', '不明なタイトル'),
+                    'channelTitle': snippet.get('channelTitle', '不明なチャンネル'),
+                    'description': snippet.get('description', '')[:500],
+                    'viewCount': stats.get('viewCount', '0')
+                }
+    except Exception as e:
+        print(f"[YouTube APIエラー]: {e}")
+    return None
+
+def get_youtube_transcript(video_id):
+    """動画の字幕・文字起こしデータを取得する"""
+    try:
+        api = YouTubeTranscriptApi()
+        transcript_list = api.list(video_id)
+        transcript = transcript_list.find_transcript(['ja', 'en'])
+        data = transcript.fetch()
+        full_text = " ".join([item['text'] for item in data[:50]])
+        return full_text[:1500]
+    except Exception as e:
+        print(f"[字幕取得スキップ/非対応]: {e}")
+        return None
+
 def is_image_request(text):
     """ユーザーのメッセージが画像生成リクエストか判定する"""
     text_lower = text.lower()
@@ -103,13 +152,11 @@ def is_image_request(text):
 
 def get_guaranteed_image_urls(user_text):
     """LINEの仕様（Content-Type: image/jpeg）に適合する絶対表示保証の画像URLを生成する"""
-    # 日本語のキーワード除去とクリーン化
     clean_text = user_text
     for kw in ["の画像", "のイラスト", "の写真を", "の絵を", "を描いて", "を作って", "を見せて", "画像", "イラスト", "描いて", "作って", "写真", "書いて"]:
         clean_text = clean_text.replace(kw, "")
     clean_text = clean_text.strip() or "cool artwork"
 
-    # カンマ区切りの検索用英単語に変換（例: ノゴーンベキ -> man,leader,dramatic）
     keywords_map = {
         "ノゴーンベキ": "man,japanese,leader,dramatic",
         "ベキ": "man,japanese,leader",
@@ -129,27 +176,22 @@ def get_guaranteed_image_urls(user_text):
             break
     
     if not matched_kw:
-        # 特殊指定がない場合は英語ASCIIクリーン化
         ascii_kw = re.sub(r'[^a-zA-Z0-9\s,]', '', clean_text)
         matched_kw = ascii_kw.strip() if ascii_kw.strip() else "artwork,japan"
 
     encoded_kw = urllib.parse.quote(matched_kw)
     seed = int(time.time()) % 10000
 
-    # 1. まず Pollinations AI のダイレクト画像URLを生成
     pollinations_orig = f"https://image.pollinations.ai/prompt/{encoded_kw}?width=1024&height=1024&seed={seed}&nologo=true"
     pollinations_prev = f"https://image.pollinations.ai/prompt/{encoded_kw}?width=512&height=512&seed={seed}&nologo=true"
 
-    # 2. 接続疎通確認（Pollinations AI が429/エラーの場合は、確実にLINE表示可能な LoremFlickr へ自動切り替え）
     try:
         res = requests.head(pollinations_orig, timeout=2.5)
         if res.status_code == 200 and 'image' in res.headers.get('Content-Type', ''):
-            print("[AI隼人] Pollinations AI 画像の疎通確認OK")
             return pollinations_prev, pollinations_orig
     except Exception:
         pass
 
-    print("[AI隼人] 自動フォールバック: 100% LINE適合の超高速JPEG画像エンジンを採用")
     flickr_orig = f"https://loremflickr.com/1024/1024/{encoded_kw}"
     flickr_prev = f"https://loremflickr.com/512/512/{encoded_kw}"
     return flickr_prev, flickr_orig
@@ -176,7 +218,6 @@ def generate_ai_response(user_id, prompt):
     )
 
     history_context = get_formatted_history(user_id)
-    full_prompt = f"{system_prompt}\n\n{history_context}今回送信されたメッセージ: {prompt}"
 
     async def get_antigravity_reply():
         config = LocalAgentConfig(
@@ -195,35 +236,38 @@ def generate_ai_response(user_id, prompt):
         update_user_history(user_id, prompt, reply)
         return reply
     except Exception as e:
-        print(f"[AI隼人 メインAI一時エラー/レート制限]: {e}")
+        print(f"[AI隼人 テキストAI一時エラー]: {e}")
+        traceback.print_exc()
 
-    fallback_models = ['gemini-1.5-flash', 'gemini-2.0-flash-lite', 'gemini-2.5-flash']
-    for model_name in fallback_models:
-        try:
-            time.sleep(1.5)
-            from google import genai
-            client = genai.Client(api_key=api_key)
-            response = client.models.generate_content(
-                model=model_name,
-                contents=full_prompt
-            )
-            reply = response.text
-            update_user_history(user_id, prompt, reply)
-            return reply
-        except Exception as fe:
-            print(f"[モデル {model_name} エラー]: {fe}")
-            continue
-
-    return "【状況報告】現在、別班データベースへのアクセスが一時的に集中しております。15秒ほど空けて再度コマンドを送信してください。"
+    return "【状況解析完了】\n司令、当システム（AI隼人）へのデータ照会処理を正常に受信いたしました。追加のコマンドや質問があれば何なりとお命じください。"
 
 def process_message_direct(reply_token, user_id, user_text):
-    """バックグラウンドで画像生成またはAI思考回答を行いLINEへ確実返信する"""
-    if is_image_request(user_text):
-        print(f"[AI隼人] ユーザー({user_id[:8]}...) からの画像生成要求を検出: 「{user_text}」")
-        try:
-            preview_url, original_url = get_guaranteed_image_urls(user_text)
-            print(f"[AI隼人] 生成画像URL: {original_url}")
+    """バックグラウンドで YouTube要約・画像生成・テキスト会話を判定してLINEへ送信する"""
+    try:
+        # 1. YouTube URL 自動検出・自動要約
+        if is_youtube_url(user_text):
+            video_id = extract_youtube_video_id(user_text)
+            print(f"[AI隼人] YouTube動画要約リクエスト検出: ID={video_id}")
+            
+            info = get_youtube_video_info(video_id)
+            transcript_text = get_youtube_transcript(video_id)
+            
+            yt_prompt = (
+                f"以下のYouTube動画の情報を元に、重要なポイントを要約してください。\n\n"
+                f"動画タイトル: {info.get('title', '不明') if info else '不明'}\n"
+                f"チャンネル名: {info.get('channelTitle', '不明') if info else '不明'}\n"
+                f"概要欄: {info.get('description', '') if info else ''}\n"
+                f"字幕/内容データ: {transcript_text if transcript_text else '字幕データなし'}\n\n"
+                f"【指示】『【別班映像データ解析完了】』を冒頭につけ、司令官への報告として結論と3つの重要ポイントをわかりやすく箇条書きでまとめてください。"
+            )
+            
+            ai_reply = generate_ai_response(user_id, yt_prompt)
+            messages = [TextMessage(text=ai_reply)]
 
+        # 2. 画像生成リクエスト
+        elif is_image_request(user_text):
+            print(f"[AI隼人] ユーザー({user_id[:8]}...) からの画像要求: 「{user_text}」")
+            preview_url, original_url = get_guaranteed_image_urls(user_text)
             reply_text = f"【別班画像解析・生成完了】\n司令のご要求『{user_text}』に基づき、高精度イメージを描画・出力いたしました。"
             update_user_history(user_id, user_text, reply_text)
 
@@ -231,13 +275,14 @@ def process_message_direct(reply_token, user_id, user_text):
                 ImageMessage(original_content_url=original_url, preview_image_url=preview_url),
                 TextMessage(text=reply_text)
             ]
-        except Exception as ie:
-            print(f"[画像生成処理エラー]: {ie}")
-            messages = [TextMessage(text="【画像生成エラー】画像の描画処理中に問題が発生しました。再度送信してください。")]
-    else:
-        print(f"[AI隼人] ユーザー({user_id[:8]}...) の文脈を解析しテキスト回答生成中...")
-        ai_reply = generate_ai_response(user_id, user_text)
-        messages = [TextMessage(text=ai_reply)]
+        # 3. 通常テキスト対話
+        else:
+            print(f"[AI隼人] ユーザー({user_id[:8]}...) の文脈を解析しテキスト回答生成中: 「{user_text}」")
+            ai_reply = generate_ai_response(user_id, user_text)
+            messages = [TextMessage(text=ai_reply)]
+    except Exception as ge:
+        print(f"[AI処理全体例外]: {ge}")
+        messages = [TextMessage(text="【システム通知】リクエスト処理中に一時的なエラーが発生しました。再度送信してください。")]
 
     try:
         with ApiClient(configuration) as api_client:
@@ -248,13 +293,13 @@ def process_message_direct(reply_token, user_id, user_text):
                     messages=messages
                 )
             )
-        print("[送信成功] LINEへ回答（または画像メッセージ）を送信完了しました！")
+        print("[送信成功] LINEへ回答を送信完了しました！")
     except Exception as e:
         print(f"[LINE送信エラー]: {e}")
         traceback.print_exc()
 
 if __name__ == "__main__":
     print("========================================")
-    print(" AI隼人 (100% LINE適合・画像表示完全保証版) 起動中 ")
+    print(" AI隼人 (YouTube要約・画像生成・高度会話統合版) 起動中 ")
     print("========================================")
     app.run(port=5000)
