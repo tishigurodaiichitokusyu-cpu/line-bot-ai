@@ -6,7 +6,7 @@ import threading
 import urllib.parse
 import traceback
 import requests
-from flask import Flask, request, abort, Response
+from flask import Flask, request, abort
 from dotenv import load_dotenv
 
 from linebot.v3 import WebhookHandler
@@ -90,13 +90,25 @@ def callback():
 
     return 'OK', 200
 
-def generate_image_url(prompt, width=1024, height=1024):
-    """LINEの厳格な要件（image/jpeg）に100%適合する画像URLを作成する"""
-    # URLエンコード
+def generate_and_warmup_image(prompt):
+    """LINEアプリで0.1秒で表示できるよう超軽量化＆事前ウォームアップを行う"""
     encoded_prompt = urllib.parse.quote(prompt)
     seed = int(time.time()) % 10000
-    image_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width={width}&height={height}&seed={seed}&nologo=true"
-    return image_url
+    
+    # プレビュー用（超軽量256px）と拡大表示用（768px）
+    preview_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=256&height=256&seed={seed}&nologo=true"
+    original_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=768&height=768&seed={seed}&nologo=true"
+    
+    # LINEに送信する前に、サーバー側で画像を事前ロード（キャッシュ化）して表示遅延をなくす
+    try:
+        print("[AI隼人] 画像の事前生成・軽量化処理中...")
+        requests.get(preview_url, timeout=8)
+        requests.get(original_url, timeout=8)
+        print("[AI隼人] 画像のキャッシュ化完了（LINEで即時開ける状態になりました）")
+    except Exception as e:
+        print(f"[ウォームアップ警告]: {e}")
+        
+    return preview_url, original_url
 
 def is_image_request(text):
     """ユーザーのメッセージが画像生成リクエストか判定する"""
@@ -109,7 +121,7 @@ def is_image_request(text):
     return any(k in text_lower for k in keywords)
 
 def translate_to_english_prompt(text):
-    """Geminiを使って画像生成用に最適化された高品質英語プロンプトに変換する"""
+    """Geminiを使って画像生成用に最適化された英語プロンプトに変換する"""
     api_key = os.getenv('GEMINI_API_KEY')
     if not api_key:
         return f"masterpiece, highly detailed, {text}"
@@ -193,15 +205,13 @@ def process_message_direct(reply_token, user_id, user_text):
     if is_image_request(user_text):
         print(f"[AI隼人] ユーザー({user_id[:8]}...) からの画像生成要求を検出: 「{user_text}」")
         
-        # 最適化英語プロンプトの作成
         english_prompt = translate_to_english_prompt(user_text)
-        print(f"[AI隼人] 画像生成用英語プロンプト: {english_prompt}")
+        print(f"[AI隼人] 画像プロンプト: {english_prompt}")
 
-        # LINE適合（Content-Type: image/jpeg）の画像URL生成
-        original_url = generate_image_url(english_prompt, width=1024, height=1024)
-        preview_url = generate_image_url(english_prompt, width=512, height=512)
+        # LINEアプリで即時開けるよう、事前ウォームアップ＆容量最適化（プレビュー256px）
+        preview_url, original_url = generate_and_warmup_image(english_prompt)
         
-        reply_text = f"【別班画像解析・生成完了】\n司令のご要求『{user_text}』に基づき、高精度イメージを描画・出力いたしました。"
+        reply_text = f"【別班画像解析・生成完了】\n司令のご要求『{user_text}』に基づき、超軽量化済みのイメージを出力いたしました。"
         update_user_history(user_id, user_text, reply_text)
 
         messages = [
@@ -229,6 +239,6 @@ def process_message_direct(reply_token, user_id, user_text):
 
 if __name__ == "__main__":
     print("========================================")
-    print(" AI隼人 (LINE画像適合版) 起動中 ")
+    print(" AI隼人 (画像高速軽量化・即時表示版) 起動中 ")
     print("========================================")
     app.run(port=5000)
