@@ -5,7 +5,6 @@ import asyncio
 import threading
 import urllib.parse
 import traceback
-import requests
 from flask import Flask, request, abort
 from dotenv import load_dotenv
 
@@ -89,26 +88,6 @@ def callback():
         print(f"[パースエラー]: {e}")
 
     return 'OK', 200
-
-def generate_and_warmup_image(prompt):
-    """LINEアプリで0.1秒で表示できるよう超軽量化＆事前ウォームアップを行う"""
-    encoded_prompt = urllib.parse.quote(prompt)
-    seed = int(time.time()) % 10000
-    
-    # プレビュー用（超軽量256px）と拡大表示用（768px）
-    preview_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=256&height=256&seed={seed}&nologo=true"
-    original_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=768&height=768&seed={seed}&nologo=true"
-    
-    # LINEに送信する前に、サーバー側で画像を事前ロード（キャッシュ化）して表示遅延をなくす
-    try:
-        print("[AI隼人] 画像の事前生成・軽量化処理中...")
-        requests.get(preview_url, timeout=8)
-        requests.get(original_url, timeout=8)
-        print("[AI隼人] 画像のキャッシュ化完了（LINEで即時開ける状態になりました）")
-    except Exception as e:
-        print(f"[ウォームアップ警告]: {e}")
-        
-    return preview_url, original_url
 
 def is_image_request(text):
     """ユーザーのメッセージが画像生成リクエストか判定する"""
@@ -201,23 +180,27 @@ def generate_ai_response(user_id, prompt):
     return "【状況報告】現在、別班データベースへのアクセスが一時的に集中しております。15秒ほど空けて再度コマンドを送信してください。"
 
 def process_message_direct(reply_token, user_id, user_text):
-    """バックグラウンドで画像生成またはAI思考回答を行いLINEへ返信する"""
+    """バックグラウンドで画像生成またはAI思考回答を行いLINEへ確実返信する"""
     if is_image_request(user_text):
         print(f"[AI隼人] ユーザー({user_id[:8]}...) からの画像生成要求を検出: 「{user_text}」")
-        
-        english_prompt = translate_to_english_prompt(user_text)
-        print(f"[AI隼人] 画像プロンプト: {english_prompt}")
+        try:
+            english_prompt = translate_to_english_prompt(user_text)
+            encoded_prompt = urllib.parse.quote(english_prompt)
+            seed = int(time.time()) % 10000
 
-        # LINEアプリで即時開けるよう、事前ウォームアップ＆容量最適化（プレビュー256px）
-        preview_url, original_url = generate_and_warmup_image(english_prompt)
-        
-        reply_text = f"【別班画像解析・生成完了】\n司令のご要求『{user_text}』に基づき、超軽量化済みのイメージを出力いたしました。"
-        update_user_history(user_id, user_text, reply_text)
+            original_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&seed={seed}&nologo=true"
+            preview_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=512&height=512&seed={seed}&nologo=true"
+            
+            reply_text = f"【別班画像解析・生成完了】\n司令のご要求『{user_text}』に基づき、高精度イメージを描画・出力いたしました。"
+            update_user_history(user_id, user_text, reply_text)
 
-        messages = [
-            ImageMessage(original_content_url=original_url, preview_image_url=preview_url),
-            TextMessage(text=reply_text)
-        ]
+            messages = [
+                ImageMessage(original_content_url=original_url, preview_image_url=preview_url),
+                TextMessage(text=reply_text)
+            ]
+        except Exception as ie:
+            print(f"[画像生成処理エラー]: {ie}")
+            messages = [TextMessage(text="【画像生成エラー】画像の描画処理中に問題が発生しました。再度送信してください。")]
     else:
         print(f"[AI隼人] ユーザー({user_id[:8]}...) の文脈を解析しテキスト回答生成中...")
         ai_reply = generate_ai_response(user_id, user_text)
@@ -232,13 +215,13 @@ def process_message_direct(reply_token, user_id, user_text):
                     messages=messages
                 )
             )
-        print("[送信成功] LINEへ回答（または画像メッセージ）を送信しました！")
+        print("[送信成功] LINEへ回答（または画像メッセージ）を送信完了しました！")
     except Exception as e:
         print(f"[LINE送信エラー]: {e}")
         traceback.print_exc()
 
 if __name__ == "__main__":
     print("========================================")
-    print(" AI隼人 (画像高速軽量化・即時表示版) 起動中 ")
+    print(" AI隼人 (非ブロック型・高信頼性画像対応) 起動中 ")
     print("========================================")
     app.run(port=5000)
