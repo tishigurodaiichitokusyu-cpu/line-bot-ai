@@ -97,6 +97,44 @@ def is_youtube_url(text):
     """YouTubeのURLか判定する"""
     return bool(re.search(r'(https?://)?(www\.)?(youtube\.com|youtu\.be)/', text))
 
+def is_youtube_search_request(text):
+    """YouTubeの動画検索・おすすめ依頼か判定する"""
+    text_lower = text.lower()
+    keywords = ["youtube", "ユーチューブ", "動画", "チャンネル", "おすすめ", "動画検索", "動画探して", "動画見たい"]
+    return any(k in text_lower for k in keywords) and not is_youtube_url(text)
+
+def search_youtube_videos(query):
+    """YouTube Data API v3 を使用してリアルタイム動画検索・おすすめリストを生成する"""
+    api_key = os.getenv('YOUTUBE_API_KEY')
+    if not api_key:
+        return "【システム警告】YOUTUBE_API_KEY が設定されていません。"
+
+    # クエリのクリーン化
+    clean_query = query
+    for kw in ["YouTubeで", "YouTubeの", "おすすめの", "動画教えて", "動画検索して", "動画探して", "探して", "教えて", "見せて"]:
+        clean_query = clean_query.replace(kw, "")
+    clean_query = clean_query.strip() or "人気動画"
+
+    try:
+        endpoint = f"https://www.googleapis.com/youtube/v3/search?part=snippet&q={urllib.parse.quote(clean_query)}&type=video&maxResults=3&key={api_key}"
+        res = requests.get(endpoint, timeout=5)
+        if res.status_code == 200:
+            items = res.json().get('items', [])
+            if items:
+                reply = f"【別班YouTubeデータ照会完了】\n司令、ご要求キーワード『{clean_query}』に基づき、YouTubeより最適なオススメ動画3本を検出・照会いたしました。\n\n"
+                for i, item in enumerate(items, 1):
+                    title = item['snippet']['title']
+                    channel = item['snippet']['channelTitle']
+                    vid = item['id']['videoId']
+                    yt_url = f"https://youtu.be/{vid}"
+                    reply += f"{i}. 『{title}』\n   チャンネル: {channel}\n   URL: {yt_url}\n\n"
+                reply += "動画のURLを返信していただければ、当システムがさらに内容を要約・分析いたします。"
+                return reply
+    except Exception as e:
+        print(f"[YouTube検索エラー]: {e}")
+    
+    return f"【状況報告】YouTubeデータベースへのアクセス中にエラーが発生しました。キーワード『{clean_query}』を変更して再試行してください。"
+
 def extract_youtube_video_id(url):
     """YouTube URLから動画IDを抽出する"""
     match = re.search(r'(?:v=|\/|embed\/|shorts\/)([0-9A-Za-z_-]{11})', url)
@@ -144,8 +182,12 @@ def is_image_request(text):
     """ユーザーが明示的に画像の描画・作成を求めている場合のみ True と判定する"""
     text_clean = text.strip()
     
-    exclude_words = ["文章", "テキスト", "解説", "理由", "やり方", "方法", "要約", "コード", "プログラミング", "教えて", "どう思う", "について"]
-    if any(ex in text_clean for ex in exclude_words):
+    # YouTube関連やテキスト回答・動画検索を求める誤検知防止キーワード
+    exclude_words = [
+        "文章", "テキスト", "解説", "理由", "やり方", "方法", "要約", "コード", "プログラミング", 
+        "教えて", "どう思う", "について", "youtube", "ユーチューブ", "動画", "おすすめ", "チャンネル", "検索", "探して"
+    ]
+    if any(ex in text_clean.lower() for ex in exclude_words):
         return False
 
     explicit_patterns = [
@@ -260,7 +302,7 @@ def generate_ai_response(user_id, prompt):
     return "【状況解析完了】\n司令、当システム（AI隼人）へのデータ照会処理を正常に受信いたしました。追加のコマンドや質問があれば何なりとお命じください。"
 
 def process_message_direct(reply_token, user_id, user_text):
-    """バックグラウンドで YouTube要約・汎用ナレッジ型画像生成・テキスト会話を判定してLINEへ送信する"""
+    """バックグラウンドで YouTube要約・YouTube動画検索・画像生成・テキスト会話を完璧に判定してLINEへ送信する"""
     try:
         # 1. YouTube URL 自動検出・自動要約
         if is_youtube_url(user_text):
@@ -282,7 +324,14 @@ def process_message_direct(reply_token, user_id, user_text):
             ai_reply = generate_ai_response(user_id, yt_prompt)
             messages = [TextMessage(text=ai_reply)]
 
-        # 2. 明確な画像生成リクエスト（例: 〜のイラストを描いて）
+        # 2. YouTube 動画検索・おすすめ依頼判定
+        elif is_youtube_search_request(user_text):
+            print(f"[AI隼人] YouTube動画検索・おすすめ要求検出: 「{user_text}」")
+            search_reply = search_youtube_videos(user_text)
+            update_user_history(user_id, user_text, search_reply)
+            messages = [TextMessage(text=search_reply)]
+
+        # 3. 明確な画像生成リクエスト（例: 〜のイラストを描いて）
         elif is_image_request(user_text):
             print(f"[AI隼人] ユーザー({user_id[:8]}...) からの全自動汎用ナレッジ画像要求: 「{user_text}」")
             preview_url, original_url = get_guaranteed_image_urls(user_id, user_text)
@@ -294,11 +343,13 @@ def process_message_direct(reply_token, user_id, user_text):
                 ImageMessage(original_content_url=original_url, preview_image_url=preview_url),
                 TextMessage(text=reply_text)
             ]
-        # 3. 通常テキスト対話（臨機応変なテキスト返信）
+
+        # 4. 通常テキスト対話（臨機応変なテキスト返信）
         else:
             print(f"[AI隼人] ユーザー({user_id[:8]}...) のテキスト対話要求: 「{user_text}」")
             ai_reply = generate_ai_response(user_id, user_text)
             messages = [TextMessage(text=ai_reply)]
+
     except Exception as ge:
         print(f"[AI処理全体例外]: {ge}")
         messages = [TextMessage(text="【システム通知】リクエスト処理中に一時的なエラーが発生しました。再度送信してください。")]
@@ -319,6 +370,6 @@ def process_message_direct(reply_token, user_id, user_text):
 
 if __name__ == "__main__":
     print("========================================")
-    print(" AI隼人 (全主題対応・全自動ナレッジ検索画像統合版) 起動中 ")
+    print(" AI隼人 (YouTubeリアルタイム検索・高度画像判定統合版) 起動中 ")
     print("========================================")
     app.run(port=5000)
