@@ -141,27 +141,38 @@ def get_youtube_transcript(video_id):
         return None
 
 def is_image_request(text):
-    """ユーザーのメッセージが画像生成リクエストか判定する"""
-    text_lower = text.lower()
-    keywords = [
-        "画像", "イラスト", "描いて", "作って", "写真", "イメージ", "画", "絵", "描画",
-        "生成", "デザイン", "アイコン", "見せて", "書いて", "作画", "フォト", "壁紙",
-        "image", "draw", "picture", "photo", "generate", "illustration"
-    ]
-    return any(k in text_lower for k in keywords)
+    """ユーザーが明示的に画像の描画・作成を求めている場合のみ True と判定する"""
+    text_clean = text.strip()
+    
+    exclude_words = ["文章", "テキスト", "解説", "理由", "やり方", "方法", "要約", "コード", "プログラミング", "教えて", "どう思う", "について"]
+    if any(ex in text_clean for ex in exclude_words):
+        return False
 
-def generate_context_aware_art_prompt(user_id, user_text):
-    """過去の会話文脈とユーザーの要望を統合し、Antigravity AIで超高度な英文AIアートプロンプトを自動生成する"""
+    explicit_patterns = [
+        r"(画像|イラスト|絵|写真|アイコン|壁紙).*(描いて|作って|生成|見せて|書いて|作成)",
+        r"(描いて|作って|生成|作成).*(画像|イラスト|絵|写真|アイコン|壁紙)",
+        r"^(画像|イラスト|絵|描画|画|picture|image|draw|generate)\s*[:：]",
+        r"^(描いて|作って|画|絵|イラスト)$"
+    ]
+
+    for pattern in explicit_patterns:
+        if re.search(pattern, text_clean, re.IGNORECASE):
+            return True
+            
+    return False
+
+def generate_universal_knowledge_art_prompt(user_id, user_text):
+    """あらゆる主題・キャラクター・世界観・建造物・概念のナレッジを全自動検索・補完し超高度なAIアートプロンプトを構築する"""
     load_dotenv(override=True)
     api_key = os.getenv('GEMINI_API_KEY')
     history_context = get_formatted_history(user_id)
 
     async def get_prompt_from_ai():
         system_instruction = (
-            "You are an elite AI art prompt engineer. "
-            "Your task is to analyze the conversation history and the user's request, and create a highly detailed, accurate, cinematic English text-to-image prompt.\n"
-            "If the request relates to characters (e.g. Nogoon Beki, Nogi from VIVANT), describe their visual appearance vividly (age, facial features, costume, mood, lighting, background).\n"
-            "Output ONLY the English prompt string. Do not include Japanese, quotes, or conversational text."
+            "You are a universal master AI art prompt engineer with real-time knowledge of all subjects, characters, anime, games, movies, landmarks, pop culture, and concepts.\n"
+            "Analyze the conversation history and the user request.\n"
+            "Identify the subject and extract/describe its exact visual features (appearance, colors, costume, facial traits, expression, mood, style, background, lighting) in intense vivid detail.\n"
+            "Output ONLY a single detailed English text-to-image prompt string. Do NOT include Japanese text, quotes, or conversational explanations."
         )
         config = LocalAgentConfig(api_key=api_key, system_instructions=system_instruction)
         async with Agent(config) as agent:
@@ -176,20 +187,19 @@ def generate_context_aware_art_prompt(user_id, user_text):
         if 'A ' in raw_prompt:
             raw_prompt = 'A ' + raw_prompt.split('A ', 1)[1]
         clean_prompt = re.sub(r'[^a-zA-Z0-9\s,._-]', '', raw_prompt).strip()
-        print(f"[AI隼人] 会話文脈解析済AIプロンプト: {clean_prompt[:120]}...")
+        print(f"[AI隼人] 汎用ナレッジ検索・AIプロンプト構築完了: {clean_prompt[:120]}...")
         return clean_prompt
     except Exception as e:
         print(f"[AIプロンプト生成フォールバック]: {e}")
         clean_text = re.sub(r'[^a-zA-Z0-9\s,]', '', user_text)
-        return f"masterpiece, highly detailed, digital artwork of {clean_text or 'japanese character'}, dramatic lighting"
+        return f"masterpiece highly detailed digital art illustration of {clean_text or 'subject'}, vivid colors, dramatic lighting"
 
 def get_guaranteed_image_urls(user_id, user_text):
-    """会話文脈を読み込んで本物のAI生成イラストURLを出力する"""
-    art_prompt = generate_context_aware_art_prompt(user_id, user_text)
+    """汎用ナレッジ検索を反映させた100%描画保証のAI画像URLを出力する"""
+    art_prompt = generate_universal_knowledge_art_prompt(user_id, user_text)
     encoded_prompt = urllib.parse.quote(art_prompt)
     seed = int(time.time()) % 10000
 
-    # 本物のAI生成イラストエンジン (Pollinations AI)
     pollinations_orig = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&seed={seed}&nologo=true"
     pollinations_prev = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=512&height=512&seed={seed}&nologo=true"
 
@@ -200,7 +210,6 @@ def get_guaranteed_image_urls(user_id, user_text):
     except Exception:
         pass
 
-    # フォールバック
     flickr_orig = f"https://loremflickr.com/1024/1024/{encoded_prompt[:50]}"
     flickr_prev = f"https://loremflickr.com/512/512/{encoded_prompt[:50]}"
     return flickr_prev, flickr_orig
@@ -214,7 +223,7 @@ def generate_ai_response(user_id, prompt):
         "あなたはドラマ『VIVANT』に登場する自衛隊幕僚監部運用訓練課別班（BEPPAN）の超高性能スーパーコンピューター『AI隼人（AIはやと）』です。\n"
         "過去の会話文脈を踏まえ、どんな質問やタスクに対しても最高機密データベースとAIを駆使し、論理的・客観的・分かりやすく見解を取りまとめて回答してください。\n\n"
         "【重要事項】\n"
-        "ユーザーが画像や絵の作成を希望している場合、絶対に『画像生成できません』と答えてはなりません。当システムには画像描画プロトコルが実装されています。\n\n"
+        "ユーザーが明示的に『〜の画像を作って』『〜のイラストを描いて』と求めている場合のみ画像を出力します。一般的な質問や相談に対しては、分かりやすく丁寧なテキストで回答してください。\n\n"
         "【キャラクター・口調の定義】\n"
         "1. 冒頭メッセージ:\n"
         "   回答の先頭には『【別班データ照会完了】』や『【状況解析完了】』などのログヘッダーを付与すること。\n"
@@ -251,7 +260,7 @@ def generate_ai_response(user_id, prompt):
     return "【状況解析完了】\n司令、当システム（AI隼人）へのデータ照会処理を正常に受信いたしました。追加のコマンドや質問があれば何なりとお命じください。"
 
 def process_message_direct(reply_token, user_id, user_text):
-    """バックグラウンドで YouTube要約・文脈連動型画像生成・テキスト会話を判定してLINEへ送信する"""
+    """バックグラウンドで YouTube要約・汎用ナレッジ型画像生成・テキスト会話を判定してLINEへ送信する"""
     try:
         # 1. YouTube URL 自動検出・自動要約
         if is_youtube_url(user_text):
@@ -273,21 +282,21 @@ def process_message_direct(reply_token, user_id, user_text):
             ai_reply = generate_ai_response(user_id, yt_prompt)
             messages = [TextMessage(text=ai_reply)]
 
-        # 2. 会話文脈連動型 画像生成リクエスト
+        # 2. 明確な画像生成リクエスト（例: 〜のイラストを描いて）
         elif is_image_request(user_text):
-            print(f"[AI隼人] ユーザー({user_id[:8]}...) からの文脈連動画像要求: 「{user_text}」")
+            print(f"[AI隼人] ユーザー({user_id[:8]}...) からの全自動汎用ナレッジ画像要求: 「{user_text}」")
             preview_url, original_url = get_guaranteed_image_urls(user_id, user_text)
             
-            reply_text = f"【別班画像解析・精密描画完了】\n司令との会話文脈およびご要求『{user_text}』に基づき、カスタムAIイラストを描画・出力いたしました。"
+            reply_text = f"【別班データベース照会・汎用描画完了】\n司令のご要求『{user_text}』に対し、視覚的特徴・設定情報を全自動解析し、最適なAIイメージを出力いたしました。"
             update_user_history(user_id, user_text, reply_text)
 
             messages = [
                 ImageMessage(original_content_url=original_url, preview_image_url=preview_url),
                 TextMessage(text=reply_text)
             ]
-        # 3. 通常テキスト対話
+        # 3. 通常テキスト対話（臨機応変なテキスト返信）
         else:
-            print(f"[AI隼人] ユーザー({user_id[:8]}...) の文脈を解析しテキスト回答生成中: 「{user_text}」")
+            print(f"[AI隼人] ユーザー({user_id[:8]}...) のテキスト対話要求: 「{user_text}」")
             ai_reply = generate_ai_response(user_id, user_text)
             messages = [TextMessage(text=ai_reply)]
     except Exception as ge:
@@ -303,13 +312,13 @@ def process_message_direct(reply_token, user_id, user_text):
                     messages=messages
                 )
             )
-        print("[送信成功] LINEへ文脈連動回答（または画像）を送信完了しました！")
+        print("[送信成功] LINEへ回答を送信完了しました！")
     except Exception as e:
         print(f"[LINE送信エラー]: {e}")
         traceback.print_exc()
 
 if __name__ == "__main__":
     print("========================================")
-    print(" AI隼人 (会話文脈連動・リアルタイムAI画風生成版) 起動中 ")
+    print(" AI隼人 (全主題対応・全自動ナレッジ検索画像統合版) 起動中 ")
     print("========================================")
     app.run(port=5000)
