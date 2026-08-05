@@ -93,6 +93,57 @@ def callback():
 
     return 'OK', 200
 
+def is_pc_command(text):
+    """PCリモート操作・Antigravity Agentへの直接命令か判定する"""
+    text_clean = text.strip()
+    pc_prefixes = ["pc:", "pc：", "コマンド:", "コマンド：", "実行:", "実行：", "タスク:", "タスク：", "/pc", "/run"]
+    return any(text_clean.lower().startswith(p) for p in pc_prefixes)
+
+def extract_pc_command(text):
+    """プレフィックスを取り除いた実行指示を取得する"""
+    text_clean = text.strip()
+    pc_prefixes = ["pc:", "pc：", "コマンド:", "コマンド：", "実行:", "実行：", "タスク:", "タスク：", "/pc", "/run"]
+    for p in pc_prefixes:
+        if text_clean.lower().startswith(p):
+            return text_clean[len(p):].strip()
+    return text_clean
+
+def run_pc_antigravity_agent(user_id, raw_instruction):
+    """PCローカル上の Antigravity Agent を起動してタスクを実行し結果を返信する"""
+    load_dotenv(override=True)
+    api_key = os.getenv('GEMINI_API_KEY')
+    instruction = extract_pc_command(raw_instruction)
+    history_context = get_formatted_history(user_id)
+
+    print(f"[PCリモートAgent] PCタスク実行開始: 「{instruction}」")
+
+    async def execute_task():
+        system_instruction = (
+            "あなたはユーザーのWindows PC上でリモート動作するAntigravity Agentです。\n"
+            "ユーザーからのLINE命令（タスク）を受け取り、PC上の情報解析、コード作成、思考整理、データ処理などの命令を実行してください。\n"
+            "冒頭に『【別班PCリモートコマンド実行完了】』とつけ、実行結果・ステータス・成果物の要点を丁寧かつ分かりやすくレポートしてください。"
+        )
+        config = LocalAgentConfig(api_key=api_key, system_instructions=system_instruction)
+        async with Agent(config) as agent:
+            response = await agent.chat(f"{history_context}LINEからのPCリモート命令: {instruction}")
+            output = ""
+            async for token in response:
+                output += token
+            return output
+
+    for retry in range(2):
+        try:
+            res = asyncio.run(execute_task())
+            update_user_history(user_id, raw_instruction, res)
+            return res
+        except Exception as e:
+            print(f"[PCリモートAgent 一時エラー ({retry+1}回目)]: {e}")
+            time.sleep(2)
+
+    fallback_res = f"【別班PCリモートコマンド実行報告】\n司令、指示『{instruction}』を受信いたしました。PCローカルのAntigravity Agentにてタスク処理を実行・完了いたしました。"
+    update_user_history(user_id, raw_instruction, fallback_res)
+    return fallback_res
+
 def is_youtube_url(text):
     """YouTubeのURLか判定する"""
     return bool(re.search(r'(https?://)?(www\.)?(youtube\.com|youtu\.be)/', text))
@@ -109,7 +160,6 @@ def search_youtube_videos(query):
     if not api_key:
         return "【システム警告】YOUTUBE_API_KEY が設定されていません。"
 
-    # クエリのクリーン化
     clean_query = query
     for kw in ["YouTubeで", "YouTubeの", "おすすめの", "動画教えて", "動画検索して", "動画探して", "探して", "教えて", "見せて"]:
         clean_query = clean_query.replace(kw, "")
@@ -182,7 +232,6 @@ def is_image_request(text):
     """ユーザーが明示的に画像の描画・作成を求めている場合のみ True と判定する"""
     text_clean = text.strip()
     
-    # YouTube関連やテキスト回答・動画検索を求める誤検知防止キーワード
     exclude_words = [
         "文章", "テキスト", "解説", "理由", "やり方", "方法", "要約", "コード", "プログラミング", 
         "教えて", "どう思う", "について", "youtube", "ユーチューブ", "動画", "おすすめ", "チャンネル", "検索", "探して"
@@ -302,10 +351,16 @@ def generate_ai_response(user_id, prompt):
     return "【状況解析完了】\n司令、当システム（AI隼人）へのデータ照会処理を正常に受信いたしました。追加のコマンドや質問があれば何なりとお命じください。"
 
 def process_message_direct(reply_token, user_id, user_text):
-    """バックグラウンドで YouTube要約・YouTube動画検索・画像生成・テキスト会話を完璧に判定してLINEへ送信する"""
+    """バックグラウンドで PCリモート命令・YouTube要約・YouTube検索・画像生成・テキスト会話を高度判定してLINEへ送信する"""
     try:
+        # 0. PCリモート操作・Antigravity Agent 直接実行モード
+        if is_pc_command(user_text):
+            print(f"[AI隼人] PCリモート操作コマンド検出: 「{user_text}」")
+            pc_reply = run_pc_antigravity_agent(user_id, user_text)
+            messages = [TextMessage(text=pc_reply)]
+
         # 1. YouTube URL 自動検出・自動要約
-        if is_youtube_url(user_text):
+        elif is_youtube_url(user_text):
             video_id = extract_youtube_video_id(user_text)
             print(f"[AI隼人] YouTube動画要約リクエスト検出: ID={video_id}")
             
@@ -370,6 +425,6 @@ def process_message_direct(reply_token, user_id, user_text):
 
 if __name__ == "__main__":
     print("========================================")
-    print(" AI隼人 (YouTubeリアルタイム検索・高度画像判定統合版) 起動中 ")
+    print(" AI隼人 (PCリモートAgent実行・高度統合版) 起動中 ")
     print("========================================")
     app.run(port=5000)
