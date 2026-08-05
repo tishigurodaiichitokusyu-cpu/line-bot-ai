@@ -150,50 +150,59 @@ def is_image_request(text):
     ]
     return any(k in text_lower for k in keywords)
 
-def get_guaranteed_image_urls(user_text):
-    """LINEの仕様（Content-Type: image/jpeg）に適合する絶対表示保証の画像URLを生成する"""
-    clean_text = user_text
-    for kw in ["の画像", "のイラスト", "の写真を", "の絵を", "を描いて", "を作って", "を見せて", "画像", "イラスト", "描いて", "作って", "写真", "書いて"]:
-        clean_text = clean_text.replace(kw, "")
-    clean_text = clean_text.strip() or "cool artwork"
+def generate_context_aware_art_prompt(user_id, user_text):
+    """過去の会話文脈とユーザーの要望を統合し、Antigravity AIで超高度な英文AIアートプロンプトを自動生成する"""
+    load_dotenv(override=True)
+    api_key = os.getenv('GEMINI_API_KEY')
+    history_context = get_formatted_history(user_id)
 
-    keywords_map = {
-        "ノゴーンベキ": "man,japanese,leader,dramatic",
-        "ベキ": "man,japanese,leader",
-        "乃木": "man,agent,suit",
-        "黒須": "man,agent,action",
-        "猫": "cat,cute,pet",
-        "犬": "dog,cute,pet",
-        "車": "car,supercar,speed",
-        "海": "sea,ocean,sunset",
-        "富士山": "fuji,mountain,japan"
-    }
-
-    matched_kw = None
-    for k, v in keywords_map.items():
-        if k in user_text:
-            matched_kw = v
-            break
-    
-    if not matched_kw:
-        ascii_kw = re.sub(r'[^a-zA-Z0-9\s,]', '', clean_text)
-        matched_kw = ascii_kw.strip() if ascii_kw.strip() else "artwork,japan"
-
-    encoded_kw = urllib.parse.quote(matched_kw)
-    seed = int(time.time()) % 10000
-
-    pollinations_orig = f"https://image.pollinations.ai/prompt/{encoded_kw}?width=1024&height=1024&seed={seed}&nologo=true"
-    pollinations_prev = f"https://image.pollinations.ai/prompt/{encoded_kw}?width=512&height=512&seed={seed}&nologo=true"
+    async def get_prompt_from_ai():
+        system_instruction = (
+            "You are an elite AI art prompt engineer. "
+            "Your task is to analyze the conversation history and the user's request, and create a highly detailed, accurate, cinematic English text-to-image prompt.\n"
+            "If the request relates to characters (e.g. Nogoon Beki, Nogi from VIVANT), describe their visual appearance vividly (age, facial features, costume, mood, lighting, background).\n"
+            "Output ONLY the English prompt string. Do not include Japanese, quotes, or conversational text."
+        )
+        config = LocalAgentConfig(api_key=api_key, system_instructions=system_instruction)
+        async with Agent(config) as agent:
+            resp = await agent.chat(f"{history_context}Current User Image Request: {user_text}")
+            result_text = ""
+            async for token in resp:
+                result_text += token
+            return result_text.strip()
 
     try:
-        res = requests.head(pollinations_orig, timeout=2.5)
+        raw_prompt = asyncio.run(get_prompt_from_ai())
+        if 'A ' in raw_prompt:
+            raw_prompt = 'A ' + raw_prompt.split('A ', 1)[1]
+        clean_prompt = re.sub(r'[^a-zA-Z0-9\s,._-]', '', raw_prompt).strip()
+        print(f"[AI隼人] 会話文脈解析済AIプロンプト: {clean_prompt[:120]}...")
+        return clean_prompt
+    except Exception as e:
+        print(f"[AIプロンプト生成フォールバック]: {e}")
+        clean_text = re.sub(r'[^a-zA-Z0-9\s,]', '', user_text)
+        return f"masterpiece, highly detailed, digital artwork of {clean_text or 'japanese character'}, dramatic lighting"
+
+def get_guaranteed_image_urls(user_id, user_text):
+    """会話文脈を読み込んで本物のAI生成イラストURLを出力する"""
+    art_prompt = generate_context_aware_art_prompt(user_id, user_text)
+    encoded_prompt = urllib.parse.quote(art_prompt)
+    seed = int(time.time()) % 10000
+
+    # 本物のAI生成イラストエンジン (Pollinations AI)
+    pollinations_orig = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&seed={seed}&nologo=true"
+    pollinations_prev = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=512&height=512&seed={seed}&nologo=true"
+
+    try:
+        res = requests.head(pollinations_orig, timeout=3.5)
         if res.status_code == 200 and 'image' in res.headers.get('Content-Type', ''):
             return pollinations_prev, pollinations_orig
     except Exception:
         pass
 
-    flickr_orig = f"https://loremflickr.com/1024/1024/{encoded_kw}"
-    flickr_prev = f"https://loremflickr.com/512/512/{encoded_kw}"
+    # フォールバック
+    flickr_orig = f"https://loremflickr.com/1024/1024/{encoded_prompt[:50]}"
+    flickr_prev = f"https://loremflickr.com/512/512/{encoded_prompt[:50]}"
     return flickr_prev, flickr_orig
 
 def generate_ai_response(user_id, prompt):
@@ -242,7 +251,7 @@ def generate_ai_response(user_id, prompt):
     return "【状況解析完了】\n司令、当システム（AI隼人）へのデータ照会処理を正常に受信いたしました。追加のコマンドや質問があれば何なりとお命じください。"
 
 def process_message_direct(reply_token, user_id, user_text):
-    """バックグラウンドで YouTube要約・画像生成・テキスト会話を判定してLINEへ送信する"""
+    """バックグラウンドで YouTube要約・文脈連動型画像生成・テキスト会話を判定してLINEへ送信する"""
     try:
         # 1. YouTube URL 自動検出・自動要約
         if is_youtube_url(user_text):
@@ -264,11 +273,12 @@ def process_message_direct(reply_token, user_id, user_text):
             ai_reply = generate_ai_response(user_id, yt_prompt)
             messages = [TextMessage(text=ai_reply)]
 
-        # 2. 画像生成リクエスト
+        # 2. 会話文脈連動型 画像生成リクエスト
         elif is_image_request(user_text):
-            print(f"[AI隼人] ユーザー({user_id[:8]}...) からの画像要求: 「{user_text}」")
-            preview_url, original_url = get_guaranteed_image_urls(user_text)
-            reply_text = f"【別班画像解析・生成完了】\n司令のご要求『{user_text}』に基づき、高精度イメージを描画・出力いたしました。"
+            print(f"[AI隼人] ユーザー({user_id[:8]}...) からの文脈連動画像要求: 「{user_text}」")
+            preview_url, original_url = get_guaranteed_image_urls(user_id, user_text)
+            
+            reply_text = f"【別班画像解析・精密描画完了】\n司令との会話文脈およびご要求『{user_text}』に基づき、カスタムAIイラストを描画・出力いたしました。"
             update_user_history(user_id, user_text, reply_text)
 
             messages = [
@@ -293,13 +303,13 @@ def process_message_direct(reply_token, user_id, user_text):
                     messages=messages
                 )
             )
-        print("[送信成功] LINEへ回答を送信完了しました！")
+        print("[送信成功] LINEへ文脈連動回答（または画像）を送信完了しました！")
     except Exception as e:
         print(f"[LINE送信エラー]: {e}")
         traceback.print_exc()
 
 if __name__ == "__main__":
     print("========================================")
-    print(" AI隼人 (YouTube要約・画像生成・高度会話統合版) 起動中 ")
+    print(" AI隼人 (会話文脈連動・リアルタイムAI画風生成版) 起動中 ")
     print("========================================")
     app.run(port=5000)
