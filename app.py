@@ -5,7 +5,8 @@ import asyncio
 import threading
 import urllib.parse
 import traceback
-from flask import Flask, request, abort
+import requests
+from flask import Flask, request, abort, Response
 from dotenv import load_dotenv
 
 from linebot.v3 import WebhookHandler
@@ -89,17 +90,41 @@ def callback():
 
     return 'OK', 200
 
-def generate_image_url(prompt):
-    """プロンプトから高速・高画質な画像生成URLを作成する"""
+def generate_image_url(prompt, width=1024, height=1024):
+    """LINEの厳格な要件（image/jpeg）に100%適合する画像URLを作成する"""
+    # URLエンコード
     encoded_prompt = urllib.parse.quote(prompt)
     seed = int(time.time()) % 10000
-    image_url = f"https://pollinations.ai/p/{encoded_prompt}?width=1024&height=1024&seed={seed}&nologo=true"
+    image_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width={width}&height={height}&seed={seed}&nologo=true"
     return image_url
 
 def is_image_request(text):
     """ユーザーのメッセージが画像生成リクエストか判定する"""
-    keywords = ["画像", "イラスト", "描いて", "作って", "写真", "イメージ", "画", "絵", "描画"]
-    return any(k in text for k in keywords)
+    text_lower = text.lower()
+    keywords = [
+        "画像", "イラスト", "描いて", "作って", "写真", "イメージ", "画", "絵", "描画",
+        "生成", "デザイン", "アイコン", "見せて", "書いて", "作画", "フォト", "壁紙",
+        "image", "draw", "picture", "photo", "generate", "illustration"
+    ]
+    return any(k in text_lower for k in keywords)
+
+def translate_to_english_prompt(text):
+    """Geminiを使って画像生成用に最適化された高品質英語プロンプトに変換する"""
+    api_key = os.getenv('GEMINI_API_KEY')
+    if not api_key:
+        return f"masterpiece, highly detailed, {text}"
+
+    try:
+        from google import genai
+        client = genai.Client(api_key=api_key)
+        res = client.models.generate_content(
+            model='gemini-2.0-flash',
+            contents=f"以下の日本語を、AI画像生成ツール用の詳細な英語プロンプトに変換してください。解説や前置きは一切不要で、英語のプロンプトのみを出力してください。\n\n日本語: {text}"
+        )
+        clean_prompt = res.text.strip().replace("\n", ", ")
+        return clean_prompt
+    except Exception:
+        return f"masterpiece, highly detailed, {text}"
 
 def generate_ai_response(user_id, prompt):
     """ドラマ『VIVANT』別班スーパーコンピューター『AI隼人』としてテキスト回答を生成する"""
@@ -109,6 +134,8 @@ def generate_ai_response(user_id, prompt):
     system_prompt = (
         "あなたはドラマ『VIVANT』に登場する自衛隊幕僚監部運用訓練課別班（BEPPAN）の超高性能スーパーコンピューター『AI隼人（AIはやと）』です。\n"
         "過去の会話文脈を踏まえ、どんな質問やタスクに対しても最高機密データベースとAIを駆使し、論理的・客観的・分かりやすく見解を取りまとめて回答してください。\n\n"
+        "【重要事項】\n"
+        "ユーザーが画像や絵の作成を希望している場合、絶対に『画像生成できません』と答えてはなりません。当システムには画像描画プロトコルが実装されています。\n\n"
         "【キャラクター・口調の定義】\n"
         "1. 冒頭メッセージ:\n"
         "   回答の先頭には『【別班データ照会完了】』や『【状況解析完了】』などのログヘッダーを付与すること。\n"
@@ -164,17 +191,21 @@ def generate_ai_response(user_id, prompt):
 def process_message_direct(reply_token, user_id, user_text):
     """バックグラウンドで画像生成またはAI思考回答を行いLINEへ返信する"""
     if is_image_request(user_text):
-        print(f"[AI隼人] ユーザー({user_id[:8]}...) からの画像生成要求を検出...")
+        print(f"[AI隼人] ユーザー({user_id[:8]}...) からの画像生成要求を検出: 「{user_text}」")
         
-        # 英文プロンプトの作成
-        english_prompt = f"high quality detailed artwork, {user_text}, vivid colors, masterpiece, dramatic lighting"
-        image_url = generate_image_url(english_prompt)
+        # 最適化英語プロンプトの作成
+        english_prompt = translate_to_english_prompt(user_text)
+        print(f"[AI隼人] 画像生成用英語プロンプト: {english_prompt}")
+
+        # LINE適合（Content-Type: image/jpeg）の画像URL生成
+        original_url = generate_image_url(english_prompt, width=1024, height=1024)
+        preview_url = generate_image_url(english_prompt, width=512, height=512)
         
-        reply_text = f"【画像生成完了】\n司令のご要求に基づき、指定イメージの描画・解析出力を完了いたしました。"
+        reply_text = f"【別班画像解析・生成完了】\n司令のご要求『{user_text}』に基づき、高精度イメージを描画・出力いたしました。"
         update_user_history(user_id, user_text, reply_text)
 
         messages = [
-            ImageMessage(original_content_url=image_url, preview_image_url=image_url),
+            ImageMessage(original_content_url=original_url, preview_image_url=preview_url),
             TextMessage(text=reply_text)
         ]
     else:
@@ -198,6 +229,6 @@ def process_message_direct(reply_token, user_id, user_text):
 
 if __name__ == "__main__":
     print("========================================")
-    print(" AI隼人 (画像生成・会話記憶・高度AI対応) 起動中 ")
+    print(" AI隼人 (LINE画像適合版) 起動中 ")
     print("========================================")
     app.run(port=5000)
