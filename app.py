@@ -20,7 +20,7 @@ from linebot.v3.messaging import (
     ImageMessage
 )
 
-from google.antigravity import Agent, LocalAgentConfig
+
 from youtube_transcript_api import YouTubeTranscriptApi
 
 # .env ファイルから環境変数を読み込む
@@ -37,6 +37,7 @@ handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
 user_histories = {}
 MAX_HISTORY_TURNS = 10
+pending_tasks = []
 
 def get_formatted_history(user_id):
     history = user_histories.get(user_id, [])
@@ -108,41 +109,8 @@ def extract_pc_command(text):
             return text_clean[len(p):].strip()
     return text_clean
 
-def run_pc_antigravity_agent(user_id, raw_instruction):
-    """PCローカル上の Antigravity Agent を起動してタスクを実行し結果を返信する"""
-    load_dotenv(override=True)
-    api_key = os.getenv('GEMINI_API_KEY')
-    instruction = extract_pc_command(raw_instruction)
-    history_context = get_formatted_history(user_id)
+# run_pc_antigravity_agent は local_worker.py に移行されました。
 
-    print(f"[PCリモートAgent] PCタスク実行開始: 「{instruction}」")
-
-    async def execute_task():
-        system_instruction = (
-            "あなたはユーザーのWindows PC上でリモート動作するAntigravity Agentです。\n"
-            "ユーザーからのLINE命令（タスク）を受け取り、PC上の情報解析、コード作成、思考整理、データ処理などの命令を実行してください。\n"
-            "冒頭に『【別班PCリモートコマンド実行完了】』とつけ、実行結果・ステータス・成果物の要点を丁寧かつ分かりやすくレポートしてください。"
-        )
-        config = LocalAgentConfig(api_key=api_key, system_instructions=system_instruction)
-        async with Agent(config) as agent:
-            response = await agent.chat(f"{history_context}LINEからのPCリモート命令: {instruction}")
-            output = ""
-            async for token in response:
-                output += token
-            return output
-
-    for retry in range(2):
-        try:
-            res = asyncio.run(execute_task())
-            update_user_history(user_id, raw_instruction, res)
-            return res
-        except Exception as e:
-            print(f"[PCリモートAgent 一時エラー ({retry+1}回目)]: {e}")
-            time.sleep(2)
-
-    fallback_res = f"【別班PCリモートコマンド実行報告】\n司令、指示『{instruction}』を受信いたしました。PCローカルのAntigravity Agentにてタスク処理を実行・完了いたしました。"
-    update_user_history(user_id, raw_instruction, fallback_res)
-    return fallback_res
 
 def is_youtube_url(text):
     """YouTubeのURLか判定する"""
@@ -356,7 +324,17 @@ def process_message_direct(reply_token, user_id, user_text):
         # 0. PCリモート操作・Antigravity Agent 直接実行モード
         if is_pc_command(user_text):
             print(f"[AI隼人] PCリモート操作コマンド検出: 「{user_text}」")
-            pc_reply = run_pc_antigravity_agent(user_id, user_text)
+            cmd_clean = extract_pc_command(user_text)
+            task_id = str(int(time.time() * 1000))
+            pending_tasks.append({
+                'task_id': task_id,
+                'user_id': user_id,
+                'command': cmd_clean,
+                'raw_command': user_text,
+                'status': 'pending',
+                'timestamp': time.time()
+            })
+            pc_reply = f"【別班PCリモートコマンド受理】\n司令、指示『{cmd_clean}』を受理いたしました。ローカルPC上のAI隼人ワーカーへ中継し、タスクの実行を開始します。処理完了後、結果をこのチャットへ報告いたします。"
             messages = [TextMessage(text=pc_reply)]
 
         # 1. YouTube URL 自動検出・自動要約
@@ -422,6 +400,38 @@ def process_message_direct(reply_token, user_id, user_text):
     except Exception as e:
         print(f"[LINE送信エラー]: {e}")
         traceback.print_exc()
+
+@app.route("/api/get_task", methods=['GET'])
+def get_task():
+    """ローカルPCのポーリングクライアント用API: 未処理のタスクがあれば返す"""
+    for task in pending_tasks:
+        if task['status'] == 'pending':
+            task['status'] = 'running'
+            print(f"[API] タスク配信: ID={task['task_id']}, Command=「{task['command']}」")
+            return json.dumps({
+                'task_id': task['task_id'],
+                'user_id': task['user_id'],
+                'command': task['command'],
+                'raw_command': task['raw_command'],
+                'history_context': get_formatted_history(task['user_id'])
+            }), 200, {'Content-Type': 'application/json'}
+    return json.dumps({'status': 'no_task'}), 200, {'Content-Type': 'application/json'}
+
+@app.route("/api/complete_task", methods=['POST'])
+def complete_task():
+    """ローカルPCからの完了報告用API"""
+    try:
+        data = request.json or {}
+        task_id = data.get('task_id')
+        for task in pending_tasks:
+            if task['task_id'] == task_id:
+                task['status'] = 'completed'
+                print(f"[API] タスク完了記録: ID={task_id}")
+                return 'OK', 200
+        return 'Task not found', 404
+    except Exception as e:
+        print(f"[APIエラー]: {e}")
+        return 'Internal Server Error', 500
 
 if __name__ == "__main__":
     print("========================================")
