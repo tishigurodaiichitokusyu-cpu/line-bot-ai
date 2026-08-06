@@ -9,6 +9,8 @@ import traceback
 import requests
 from flask import Flask, request, abort
 from dotenv import load_dotenv
+from google import genai
+from google.genai import types
 
 from linebot.v3 import WebhookHandler
 from linebot.v3.messaging import (
@@ -118,9 +120,18 @@ def is_youtube_url(text):
 
 def is_youtube_search_request(text):
     """YouTubeの動画検索・おすすめ依頼か判定する"""
-    text_lower = text.lower()
-    keywords = ["youtube", "ユーチューブ", "動画", "チャンネル", "おすすめ", "動画検索", "動画探して", "動画見たい"]
-    return any(k in text_lower for k in keywords) and not is_youtube_url(text)
+    text_clean = text.lower().strip()
+    
+    # YouTubeや動画検索に直接言及しているキーワード
+    explicit_keywords = ["youtube", "ユーチューブ", "動画検索", "動画探して", "動画見たい", "動画教えて"]
+    if any(k in text_clean for k in explicit_keywords):
+        return True
+        
+    # 「おすすめの動画」「おすすめ動画」のように、動画やチャンネルとおすすめが組み合わさっている場合のみ判定
+    if "おすすめ" in text_clean and any(k in text_clean for k in ["動画", "チャンネル", "映像", "ムービー"]):
+        return True
+        
+    return False
 
 def search_youtube_videos(query):
     """YouTube Data API v3 を使用してリアルタイム動画検索・おすすめリストを生成する"""
@@ -226,23 +237,22 @@ def generate_universal_knowledge_art_prompt(user_id, user_text):
     api_key = os.getenv('GEMINI_API_KEY')
     history_context = get_formatted_history(user_id)
 
-    async def get_prompt_from_ai():
+    try:
+        client = genai.Client(api_key=api_key)
         system_instruction = (
             "You are a universal master AI art prompt engineer with real-time knowledge of all subjects, characters, anime, games, movies, landmarks, pop culture, and concepts.\n"
             "Analyze the conversation history and the user request.\n"
             "Identify the subject and extract/describe its exact visual features (appearance, colors, costume, facial traits, expression, mood, style, background, lighting) in intense vivid detail.\n"
             "Output ONLY a single detailed English text-to-image prompt string. Do NOT include Japanese text, quotes, or conversational explanations."
         )
-        config = LocalAgentConfig(api_key=api_key, system_instructions=system_instruction)
-        async with Agent(config) as agent:
-            resp = await agent.chat(f"{history_context}Current User Image Request: {user_text}")
-            result_text = ""
-            async for token in resp:
-                result_text += token
-            return result_text.strip()
-
-    try:
-        raw_prompt = asyncio.run(get_prompt_from_ai())
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=f"{history_context}Current User Image Request: {user_text}",
+            config=types.GenerateContentConfig(
+                system_instruction=system_instruction,
+            )
+        )
+        raw_prompt = response.text.strip()
         if 'A ' in raw_prompt:
             raw_prompt = 'A ' + raw_prompt.split('A ', 1)[1]
         clean_prompt = re.sub(r'[^a-zA-Z0-9\s,._-]', '', raw_prompt).strip()
