@@ -279,14 +279,17 @@ def get_guaranteed_image_urls(user_id, user_text):
     except Exception:
         pass
 
-    flickr_orig = f"https://loremflickr.com/1024/1024/{encoded_prompt[:50]}"
-    flickr_prev = f"https://loremflickr.com/512/512/{encoded_prompt[:50]}"
+    flickr_orig = f"https://loremflickr.com/1024/1024/{art_prompt[:50]}"
+    flickr_prev = f"https://loremflickr.com/512/512/{art_prompt[:50]}"
     return flickr_prev, flickr_orig
 
 def generate_ai_response(user_id, prompt):
     """ドラマ『VIVANT』別班スーパーコンピューター『AI隼人』としてテキスト回答を生成する"""
     load_dotenv(override=True)
     api_key = os.getenv('GEMINI_API_KEY')
+    if not api_key:
+        print("[AI隼人] GEMINI_API_KEY が設定されていません。")
+        return "【状況解析完了】\n司令、GEMINI_API_KEY が設定されていないため、データ照会が実行できません。"
 
     system_prompt = (
         "あなたはドラマ『VIVANT』に登場する自衛隊幕僚監部運用訓練課別班（BEPPAN）の超高性能スーパーコンピューター『AI隼人（AIはやと）』です。\n"
@@ -306,20 +309,19 @@ def generate_ai_response(user_id, prompt):
 
     history_context = get_formatted_history(user_id)
 
-    async def get_antigravity_reply():
-        config = LocalAgentConfig(
-            api_key=api_key,
-            system_instructions=system_prompt
-        )
-        async with Agent(config) as agent:
-            response = await agent.chat(f"{history_context}メッセージ: {prompt}")
-            reply_text = ""
-            async for token in response:
-                reply_text += token
-            return reply_text
-
     try:
-        reply = asyncio.run(get_antigravity_reply())
+        client = genai.Client(api_key=api_key)
+        
+        # Google検索グラウンディングを有効にする！
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=f"{history_context}メッセージ: {prompt}",
+            config=types.GenerateContentConfig(
+                system_instruction=system_prompt,
+                tools=[types.Tool(google_search=types.GoogleSearch())],  # Google検索を有効化
+            ),
+        )
+        reply = response.text
         update_user_history(user_id, prompt, reply)
         return reply
     except Exception as e:
@@ -361,7 +363,7 @@ def process_message_direct(reply_token, user_id, user_text):
                 f"チャンネル名: {info.get('channelTitle', '不明') if info else '不明'}\n"
                 f"概要欄: {info.get('description', '') if info else ''}\n"
                 f"字幕/内容データ: {transcript_text if transcript_text else '字幕データなし'}\n\n"
-                f"【指示】『【別班映像データ解析完了】』を冒頭につけ、司令官への報告として結論と3つの重要ポイントをわかりやすく箇条書きでまとめてください。"
+                f"【指示】『【別班映像データ解析完了】』を冒頭につけ、司令官への報告として結論と3つの重要ポイントをわかりやすく箇ラ書きでまとめてください。"
             )
             
             ai_reply = generate_ai_response(user_id, yt_prompt)
