@@ -349,7 +349,7 @@ def generate_ai_response(user_id, prompt):
         
         # Google検索グラウンディングを有効にする！
         response = client.models.generate_content(
-            model='gemini-1.5-flash',
+            model='gemini-2.5-flash',
             contents=f"{history_context}メッセージ: {prompt}",
             config=types.GenerateContentConfig(
                 system_instruction=system_prompt,
