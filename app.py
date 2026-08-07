@@ -319,7 +319,13 @@ def generate_ai_response(user_id, prompt):
         "   ・一人称は『AI隼人』または『当システム』。\n"
         "   ・ユーザーを別班の同志または司令官としてリスペクトしサポートすること。\n"
         "3. 回答スタイル:\n"
-        "   ・結論・ポイント・解説の順で分かりやすく整理して提示すること。"
+        "   ・結論・ポイント・解説の順で分かりやすく整理して提示すること。\n\n"
+        "【Googleマップ連携に関する絶対命令】\n"
+        "ユーザーが特定の店舗や施設、観光地、目的地などの位置情報やアクセス情報を求めている場合、または「Googleマップで教えて」と求めている場合は、"
+        "回答テキストの中に、その場所を直接確認できるGoogleマップの検索用URLを必ず以下の書式で含めて案内してください：\n"
+        "https://www.google.com/maps/search/?api=1&query=<URLエンコードされた検索キーワード>\n"
+        "（例: 難波の吉本漫才劇場であれば `https://www.google.com/maps/search/?api=1&query=%E5%90%89%E6%9C%AC%E6%BC%AB%E6%89%8D%E5%8A%87%E5%A0%B4`）\n"
+        "不確かなURLを捏造せず、この公式のGoogle Maps Search APIの書式を必ず使用してください。"
     )
 
     history_context = get_formatted_history(user_id)
@@ -338,6 +344,8 @@ def generate_ai_response(user_id, prompt):
             ),
         )
         reply = response.text
+        if not reply or not reply.strip():
+            reply = "【状況解析完了】\n司令、当システム（AI隼人）へのデータ照会処理を正常に受信いたしましたが、結果を生成できませんでした。お手数ですが、再度送信してください。"
         update_user_history(user_id, prompt, reply)
         return reply
     except Exception as e:
@@ -406,7 +414,7 @@ def process_message_direct(reply_token, user_id, user_text):
             ]
 
         # 3.5 位置情報送信を促すキーワード判定
-        elif any(k in user_text for k in ["現在地", "今どこ", "場所教えて", "現在地教えて"]):
+        elif any(k in user_text for k in ["現在地", "今どこ", "現在地教えて"]):
             print(f"[AI隼人] 位置情報誘導要求検出: 「{user_text}」")
             reply_text = (
                 "【状況報告】\n"
