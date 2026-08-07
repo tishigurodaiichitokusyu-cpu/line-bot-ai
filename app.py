@@ -19,7 +19,8 @@ from linebot.v3.messaging import (
     MessagingApi,
     ReplyMessageRequest,
     TextMessage,
-    ImageMessage
+    ImageMessage,
+    LocationMessage
 )
 
 
@@ -80,15 +81,25 @@ def callback():
         data = json.loads(body)
         events = data.get('events', [])
         for event in events:
-            if event.get('type') == 'message' and event.get('message', {}).get('type') == 'text':
+            if event.get('type') == 'message':
                 reply_token = event.get('replyToken')
-                user_text = event.get('message', {}).get('text')
                 user_id = event.get('source', {}).get('userId', 'default_user')
+                msg_type = event.get('message', {}).get('type')
                 
                 if reply_token and reply_token not in ["00000000000000000000000000000000", "ffffffffffffffffffffffffffffffff"]:
-                    print(f"\n[受信] ユーザー({user_id[:8]}...): 「{user_text}」")
-                    thread = threading.Thread(target=process_message_direct, args=(reply_token, user_id, user_text))
-                    thread.start()
+                    if msg_type == 'text':
+                        user_text = event.get('message', {}).get('text')
+                        print(f"\n[受信] ユーザー({user_id[:8]}...): 「{user_text}」")
+                        thread = threading.Thread(target=process_message_direct, args=(reply_token, user_id, user_text))
+                        thread.start()
+                    elif msg_type == 'location':
+                        latitude = event.get('message', {}).get('latitude')
+                        longitude = event.get('message', {}).get('longitude')
+                        address = event.get('message', {}).get('address', '不明な住所')
+                        title = event.get('message', {}).get('title', '送信された位置')
+                        print(f"\n[受信] ユーザー({user_id[:8]}...) 位置情報: {title} ({latitude}, {longitude})")
+                        thread = threading.Thread(target=process_location_direct, args=(reply_token, user_id, latitude, longitude, address, title))
+                        thread.start()
                 else:
                     print("[検証] 接続テストを受信しました")
     except Exception as e:
@@ -394,6 +405,17 @@ def process_message_direct(reply_token, user_id, user_text):
                 TextMessage(text=reply_text)
             ]
 
+        # 3.5 位置情報送信を促すキーワード判定
+        elif any(k in user_text for k in ["現在地", "今どこ", "場所教えて", "現在地教えて"]):
+            print(f"[AI隼人] 位置情報誘導要求検出: 「{user_text}」")
+            reply_text = (
+                "【状況報告】\n"
+                "司令、セキュリティ仕様上、テキストメッセージから直接GPS現在地を取得することはできません。\n\n"
+                "お手数ですが、チャット入力欄の左側にある「＋」ボタンをタップし、「位置情報」を選択して送信してください。当システムが現在地を照合いたします。"
+            )
+            update_user_history(user_id, user_text, reply_text)
+            messages = [TextMessage(text=reply_text)]
+
         # 4. 通常テキスト対話（臨機応変なテキスト返信）
         else:
             print(f"[AI隼人] ユーザー({user_id[:8]}...) のテキスト対話要求: 「{user_text}」")
@@ -416,6 +438,42 @@ def process_message_direct(reply_token, user_id, user_text):
         print("[送信成功] LINEへ回答を送信完了しました！")
     except Exception as e:
         print(f"[LINE送信エラー]: {e}")
+        traceback.print_exc()
+
+def process_location_direct(reply_token, user_id, latitude, longitude, address, title):
+    """送られてきた位置情報を元にGoogleマップのリンクを作成して返信する"""
+    try:
+        # Google Maps の検索用URLを生成
+        google_map_url = f"https://www.google.com/maps?q={latitude},{longitude}"
+        
+        reply_text = (
+            f"【別班位置情報照合完了】\n"
+            f"司令、現在地のご送信を確認しました。\n\n"
+            f"📍 場所: {title}\n"
+            f"🏠 住所: {address}\n\n"
+            f"🗺️ Googleマップで確認:\n{google_map_url}"
+        )
+        
+        # LINEにテキストメッセージとしてマップのURL付きで返信する
+        messages = [TextMessage(text=reply_text)]
+        
+    except Exception as e:
+        print(f"[位置情報処理エラー]: {e}")
+        messages = [TextMessage(text="【システム通知】位置情報の処理中にエラーが発生しました。")]
+
+    # LINEへ送信
+    try:
+        with ApiClient(configuration) as api_client:
+            line_bot_api = MessagingApi(api_client)
+            line_bot_api.reply_message(
+                ReplyMessageRequest(
+                    reply_token=reply_token,
+                    messages=messages
+                )
+            )
+        print("[送信成功] 位置情報返信をLINEへ送信完了しました！")
+    except Exception as e:
+        print(f"[LINE位置情報返信エラー]: {e}")
         traceback.print_exc()
 
 @app.route("/api/get_task", methods=['GET'])
