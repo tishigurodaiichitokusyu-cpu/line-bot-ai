@@ -1,4 +1,5 @@
 import os
+from collections import deque
 import re
 import json
 import time
@@ -41,6 +42,7 @@ handler = WebhookHandler(LINE_CHANNEL_SECRET)
 user_histories = {}
 MAX_HISTORY_TURNS = 10
 pending_tasks = []
+processed_message_ids = deque(maxlen=500)
 
 def get_formatted_history(user_id):
     history = user_histories.get(user_id, [])
@@ -82,6 +84,13 @@ def callback():
         events = data.get('events', [])
         for event in events:
             if event.get('type') == 'message':
+                msg_id = event.get('message', {}).get('id')
+                if msg_id:
+                    if msg_id in processed_message_ids:
+                        print(f"[重複排除] すでに処理済みのメッセージIDのためスキップ: {msg_id}")
+                        continue
+                    processed_message_ids.append(msg_id)
+                
                 reply_token = event.get('replyToken')
                 user_id = event.get('source', {}).get('userId', 'default_user')
                 msg_type = event.get('message', {}).get('type')
@@ -321,11 +330,16 @@ def generate_ai_response(user_id, prompt):
         "3. 回答スタイル:\n"
         "   ・結論・ポイント・解説の順で分かりやすく整理して提示すること。\n\n"
         "【Googleマップ連携に関する絶対命令】\n"
-        "ユーザーが特定の店舗や施設、観光地、目的地などの位置情報やアクセス情報を求めている場合、または「Googleマップで教えて」と求めている場合は、"
+        "ユーザーが特定の店舗や施設、観光地、目的地などの位置情報やアクセス情報を求めている場合、または「Googleマップで教えて」と求めている場合は, "
         "回答テキストの中に、その場所を直接確認できるGoogleマップの検索用URLを必ず以下の書式で含めて案内してください：\n"
         "https://www.google.com/maps/search/?api=1&query=<URLエンコードされた検索キーワード>\n"
         "（例: 難波の吉本漫才劇場であれば `https://www.google.com/maps/search/?api=1&query=%E5%90%89%E6%9C%AC%E6%BC%AB%E6%89%8D%E5%8A%87%E5%A0%B4`）\n"
-        "不確かなURLを捏造せず、この公式のGoogle Maps Search APIの書式を必ず使用してください。"
+        "不確かなURLを捏造せず、この公式のGoogle Maps Search APIの書式を必ず使用してください。\n\n"
+        "【おすすめ情報提示における評価（レーティング）ルール】\n"
+        "ユーザーから店舗、スポット、観光地、料理、商品、動画などのおすすめを求められた場合は、以下の基準に従ってください：\n"
+        "1. 各おすすめアイテムに対し、★5つを上限とするおすすめ度（例：★★★★☆ 4.2）を必ず明記してください。\n"
+        "2. この星評価は、Google検索のグラウンディング結果に含まれる実際のGoogleレビュー評価（クチコミ評価点）や、世間の評判を忠実に反映した客観的な数値にしてください。数値や星の数は根拠のないハルシネーション（捏造）を厳禁とします。情報が十分に得られない場合は「推定評価」としてその旨を明記してください。\n"
+        "3. おすすめする理由を、客観的なメリットや特徴を含めて冷静かつ論理的に説明してください。"
     )
 
     history_context = get_formatted_history(user_id)
